@@ -5,21 +5,21 @@ import sys
 import itertools
 import pickle
 
-sys.path.append('/mnt/home/daviso53/Research/mixed_state_test')
+#sys.path.append('/mnt/home/daviso53/Research/')
 #from pyci_pairing_plus_ph import *
-import pyci_pairing_plus_ph as pyci
+import pyci.imsrg_ci.pyci_p3h as pyci
 
-sys.path.append('/mnt/home/daviso53/Research/im-srg_tensorflow/')
-from main import main
+#sys.path.append('/mnt/home/daviso53/Research/im-srg_tensorflow/')
+from tfimsrg.main import main
 
-
+    
 class ReferenceEnsemble(object):
-"""Create a reference state ensemble for the pairing plus particle-hole model 
-Hamiltonian. Ensemble is a matrix-vector product that generates a 
-reference state from a linear combination of reference state configurations
-determined by the pairing model."""
+    """Create a reference state ensemble for the pairing plus particle-hole model 
+    Hamiltonian. Ensemble is a matrix-vector product that generates a 
+    reference state from a linear combination of reference state configurations
+    determined by the pairing model."""
 
-    def __init__(self, num_states_in_ref, g_val, pb_val, generator, outfile_name, coeffs_root):
+    def __init__(self, num_states_in_ref, n_holes, n_particles, g_val, pb_val, generator, outfile_name, coeffs_root):
         """Class constructor.
         
         Arguments:
@@ -38,7 +38,47 @@ determined by the pairing model."""
         self._outfile_name = outfile_name
         self._coeffs_root = coeffs_root
 
-        refs = list(map("".join, itertools.permutations('11110000')))
+        self._n_holes= n_holes
+        self._n_particles = n_particles
+
+        ref_matrix = self.generate_ref_matrix(n_holes,n_particles)
+
+        assert num_states_in_ref <= ref_matrix.shape[0]
+
+        self._refs = ref_matrix[0:num_states_in_ref, :]
+
+        #states = pyci.init_states()
+        hme = pyci.matrix(n_holes,n_particles, 0.0, 1.0, g_val, pb_val)
+        self._true = np.linalg.eigvalsh(hme)
+
+
+    @property
+    def refs(self):
+        """Returns:
+        
+        refs -- matrix of S=0 reference state configs"""
+        return self._refs
+
+    def generate_ref_matrix(self, n_holes, n_particles):
+        """Generate a matrix of basis configs from
+        which the reference state ensemble will be
+        built. We only use the basis config where total
+        spin S = 0.
+
+        Arguments:
+
+        n_holes -- number of hole states in the model
+        n_particles -- number of particle states in the model
+
+        Returns:
+        
+        ref_matrix -- each row is a basis configuration"""
+
+        gs_config = np.append(np.ones(n_holes),
+                              np.zeros(n_particles))
+        gs_config_str = ''.join([str(int(state)) for state in gs_config])
+
+        refs = list(map("".join, itertools.permutations(gs_config_str)))
         refs = list(dict.fromkeys(refs)) # remove duplicates
         refs = [list(map(int, list(ref))) for ref in refs]
 
@@ -59,23 +99,18 @@ determined by the pairing model."""
             
         refs = refss0
 
-        refs.sort(key=self.number_of_pairs, reverse=True)
-        refs = refs[0:num_states_in_ref]
-        refs = np.asarray(refs)
-
-        self._refs = refs
-
-        states = pyci.init_states()
-        hme = pyci.matrix(states, 0.0, 1.0, g_val, pb_val)
-        self._true = np.linalg.eigvalsh(hme)
-
-
-    @property
-    def refs(self):
-        """Returns:
+        refs.sort(key=self.number_of_pairs, reverse=True)        
+        #refs = refs[0:num_states_in_ref]
         
-        refs -- matrix of S=0 reference state configs"""
-        return self._refs
+        #indices = np.r_[0,1,5,27,28]
+
+        #refs = refs[0,1,5,27,28]
+        #refs = np.asarray(refs)
+        #refs = refs[np.r_[0,1,5,27,28], :]
+
+        ref_matrix = np.asarray(refs)
+
+        return ref_matrix
 
     def number_of_pairs(self, state):
         """Key for sorting permutations.
@@ -110,25 +145,27 @@ determined by the pairing model."""
 
         # RUN IM-SRG(2)
         ref = self._refs.T.dot(x)
-        main(4,4, 
+        main(self._n_holes,self._n_particles, 
              g=self._g_val, 
              pb=self._pb_val, 
              ref=ref, 
              verbose=0, 
              generator=self._generator,
              output_root = self._coeffs_root)
-    
+
         # LOAD EVOLVED COEFFICIENTS
         H0B, H1B, H2B, eta1B_vac, eta2B_vac = pickle.load(open(self._coeffs_root+'/vac_coeffs_evolved.p', 'rb'))
 
         # PERFORM FULL CI AND GET EIGENVALUES
-        states = pyci.init_states()
-        hme = pyci.matrix(states, H0B, H1B, H2B, H2B)
+        hme = pyci.matrix(self._n_holes,self._n_particles, H0B, H1B, H2B, H2B, imsrg=True)
         ev_eigs = np.linalg.eigvalsh(hme)
-        
 
-        return abs(ev_eigs[0:num_targets] - y[0:num_targets])
-    
+        #return np.sqrt(np.mean((ev_eigs-y)**2))
+        #return abs(ev_eigs[0:num_targets] - y[0:num_targets])
+        #return abs(ev_eigs[1] - y[1])
+        #return abs(ev_eigs[0] - y[0])
+        return np.sqrt(0.80*(ev_eigs[0]-y[0])**2 + 0.20/35*((ev_eigs[1::]-y[1::]).T.dot(ev_eigs[1::]-y[1::])))
+
     def optimize_reference(self, num_targets):
         """Run the least-squares optimization, minimizing the residual
         function from self.
@@ -140,11 +177,22 @@ determined by the pairing model."""
         Returns:
 
         normalized optimized weights"""
+        
+        target_weights = np.ones(num_targets)
+        target_weights = target_weights/sum(target_weights)
+        
+        #target_weights = [0.8,0.2]
 
-        x0 = np.asarray(np.insert(np.zeros(self._refs.shape[0]-1),0,1))
+        x0 = np.asarray(np.insert(np.zeros(self._refs.shape[0]-len(target_weights)),0,target_weights))
+        print(x0)
+        
+        # num_weights = self._refs.shape[0]
+        # x0 = np.ones(num_weights)/sum(np.ones(num_weights))
+
+        #x0 = np.asarray([0.8,0.2,0,0,0,0,0,0])
 
         assert num_targets >= 1,      'num_targets  >= 1'
-        assert num_targets < len(x0), 'num_targets < len(x0)'
+        assert num_targets <= len(x0), 'num_targets < len(x0)'
 
 
         lsq = sciopt.least_squares(self.residual, 
@@ -153,11 +201,15 @@ determined by the pairing model."""
                                    args=(self._true, num_targets), 
                                    bounds=(0,1), 
                                    method='trf', 
-                                   tr_solver='exact', 
-                                   diff_step=0.2, 
-                                   loss='cauchy', 
+                                   tr_solver='lsmr', 
+                                   diff_step=0.1, 
+                                   loss='soft_l1',
+                                   tr_options={'damp':1.0},
+                                   ftol=1e-6,
                                    verbose=2) #diff_step=0.2, verbose=2)#, loss='linear')
 
-        return (lsq.x/sum(lsq.x))
+        return (lsq.x/sum(lsq.x), lsq)
 
     
+if __name__ == '__main__':
+    ReferenceEnsemble()
